@@ -1,32 +1,19 @@
-# Import libraries
-import streamlit as st
+import gradio as gr
 import pandas as pd
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import re
 import os
-from pyngrok import ngrok
-import nest_asyncio
-
-# Apply nest_asyncio to avoid runtime errors
-nest_asyncio.apply()
-
-# Create a file for the Streamlit app
-%%writefile gherkin_app.py
-import streamlit as st
-import pandas as pd
-import torch
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-import re
-import os
+import datetime
 
 # Load the fine-tuned model and tokenizer
-@st.cache_resource  # This caches the model to avoid reloading
 def load_model():
-    model_path = "./gherkin_generator_model"  # Update with your model path
+    model_path = "Smit1208/gherkin-generator"  # Your model path
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
     return model, tokenizer
+
+model, tokenizer = load_model()
 
 def validate_gherkin(gherkin_text):
     """
@@ -68,11 +55,19 @@ def validate_gherkin(gherkin_text):
     # All checks passed
     return True, "Gherkin syntax is valid! ✅"
 
-def save_feedback(feedback_data):
+def save_feedback(original_input, model_output, feedback_type, user_correction):
     """
     Save user feedback to a CSV file for later model improvement
     """
     feedback_file = "gherkin_feedback.csv"
+
+    feedback_data = {
+        "original_input": original_input,
+        "model_output": model_output,
+        "feedback_type": feedback_type,
+        "user_correction": user_correction,
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
 
     # Create DataFrame from feedback
     df_new = pd.DataFrame([feedback_data])
@@ -85,169 +80,175 @@ def save_feedback(feedback_data):
     else:
         df_new.to_csv(feedback_file, index=False)
 
-    return True
+    return "Thank you for your feedback! We'll use it to improve the model."
 
-# Main app
-def main():
-    st.set_page_config(
-        page_title="Gherkin Scenario Generator",
-        page_icon="📝",
-        layout="wide"
+def generate_gherkin(input_text, example_selector, max_length, num_beams, temperature):
+    # Use example if selected
+    if example_selector != "Select an example...":
+        input_text = examples[example_selector]
+
+    # Generate Gherkin
+    inputs = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True)
+
+    outputs = model.generate(
+        inputs.input_ids,
+        max_length=max_length,
+        num_beams=num_beams,
+        temperature=temperature,
+        early_stopping=True
     )
 
-    # Load model
-    try:
-        model, tokenizer = load_model()
-        model_loaded = True
-    except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        model_loaded = False
+    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    # App UI
-    st.title("Gherkin Scenario Generator")
-    st.write("Enter a feature description to generate Gherkin scenarios for BDD testing")
+    # Validate
+    validation_result, validation_message = validate_gherkin(generated_text)
 
-    # Sidebar with information
-    with st.sidebar:
-        st.header("About")
-        st.write("""
-        This tool uses AI to generate Gherkin scenarios from feature descriptions.
+    return generated_text, validation_message, validation_result
 
-        **Gherkin Format:**
-        - Feature: [Feature name]
-        - Scenario: [Scenario name]
-        - Given [precondition]
-        - When [action]
-        - Then [expected result]
-        """)
+# Example inputs
+examples = {
+    "Login Feature": "Create a feature for user login with valid and invalid credentials",
+    "Shopping Cart": "Generate scenarios for adding and removing items from a shopping cart",
+    "Search Functionality": "Create test scenarios for searching products with different filters",
+    "User Registration": "Generate scenarios for user registration with validation checks",
+    "Payment Processing": "Create scenarios for payment processing with different payment methods"
+}
 
-        st.header("Tips")
-        st.write("""
+# Create Gradio interface
+with gr.Blocks(title="Gherkin Scenario Generator") as demo:
+    gr.Markdown("# Gherkin Scenario Generator")
+    gr.Markdown("Enter a feature description to generate Gherkin scenarios for BDD testing")
+
+    with gr.Row():
+        with gr.Column():
+            # Input section
+            gr.Markdown("### Input")
+
+            example_selector = gr.Dropdown(
+                ["Select an example..."] + list(examples.keys()),
+                label="Try an example or write your own"
+            )
+
+            input_text = gr.Textbox(
+                lines=8,
+                label="Feature Description",
+                placeholder="Describe the feature you want to test..."
+            )
+
+            # Advanced settings
+            with gr.Accordion("Advanced Settings", open=False):
+                max_length = gr.Slider(100, 1000, 512, label="Maximum Length")
+                num_beams = gr.Slider(1, 8, 4, label="Beam Search Size")
+                temperature = gr.Slider(0.1, 1.5, 1.0, step=0.1, label="Temperature",
+                                       info="Higher values make output more random, lower values more deterministic")
+
+            generate_btn = gr.Button("Generate Gherkin", variant="primary")
+
+        with gr.Column():
+            # Output section
+            gr.Markdown("### Generated Gherkin")
+
+            output_text = gr.Code(language="gherkin", label="Generated Gherkin")
+            validation_msg = gr.Textbox(label="Validation")
+            is_valid = gr.Checkbox(label="Valid Gherkin", visible=False)
+
+            # Download button (only shows when output is valid)
+            download_btn = gr.Button("Download Gherkin", visible=False)
+
+            # Feedback section
+            with gr.Accordion("Provide Feedback", open=False):
+                gr.Markdown("### Help us improve the model by providing feedback:")
+
+                feedback_type = gr.Radio(
+                    ["Yes, it's good", "Needs minor edits", "Needs major changes"],
+                    label="Was this Gherkin scenario useful?"
+                )
+
+                user_correction = gr.Textbox(
+                    lines=6,
+                    label="Please provide a corrected version or suggestions:",
+                    visible=False
+                )
+
+                submit_feedback_btn = gr.Button("Submit Feedback", visible=False)
+                feedback_result = gr.Textbox(label="Feedback Result", visible=False)
+
+    # About section
+    with gr.Accordion("About Gherkin Format", open=False):
+        gr.Markdown("""
+        ### Gherkin Format:
+        - **Feature:** [Feature name]
+        - **Scenario:** [Scenario name]
+        - **Given** [precondition]
+        - **When** [action]
+        - **Then** [expected result]
+
+        ### Tips:
         - Be specific in your feature description
         - Include user roles, actions, and expected outcomes
         - Try different phrasings if results aren't satisfactory
         """)
 
-    # Main content area
-    col1, col2 = st.columns([1, 1])
+    # Event handlers
+    generate_btn.click(
+        generate_gherkin,
+        inputs=[input_text, example_selector, max_length, num_beams, temperature],
+        outputs=[output_text, validation_msg, is_valid]
+    )
 
-    with col1:
-        st.subheader("Input")
+    # Show/hide download button based on validation
+    def update_download_visibility(is_valid):
+        return gr.Button.update(visible=is_valid)
 
-        # Example inputs for users to try
-        examples = {
-            "Login Feature": "Create a feature for user login with valid and invalid credentials",
-            "Shopping Cart": "Generate scenarios for adding and removing items from a shopping cart",
-            "Search Functionality": "Create test scenarios for searching products with different filters",
-            "User Registration": "Generate scenarios for user registration with validation checks",
-            "Payment Processing": "Create scenarios for payment processing with different payment methods"
-        }
+    is_valid.change(
+        update_download_visibility,
+        inputs=[is_valid],
+        outputs=[download_btn]
+    )
 
-        # Add example selector
-        selected_example = st.selectbox(
-            "Try an example or write your own:",
-            ["Select an example..."] + list(examples.keys())
-        )
+    # Show/hide correction textbox based on feedback type
+    def update_correction_visibility(feedback_type):
+        needs_correction = feedback_type != "Yes, it's good"
+        return gr.Textbox.update(visible=needs_correction), gr.Button.update(visible=needs_correction)
 
-        # Text input area
-        if selected_example != "Select an example...":
-            user_input = st.text_area("Feature Description:", value=examples[selected_example], height=200)
-        else:
-            user_input = st.text_area("Feature Description:", height=200,
-                                      placeholder="Describe the feature you want to test...")
+    feedback_type.change(
+        update_correction_visibility,
+        inputs=[feedback_type],
+        outputs=[user_correction, submit_feedback_btn]
+    )
 
-        # Generation parameters
-        st.subheader("Generation Settings")
-        with st.expander("Advanced Settings"):
-            max_length = st.slider("Maximum Length", 100, 1000, 512)
-            num_beams = st.slider("Beam Search Size", 1, 8, 4)
-            temperature = st.slider("Temperature", 0.1, 1.5, 1.0, 0.1,
-                                   help="Higher values make output more random, lower values more deterministic")
+    # Handle feedback submission
+    submit_feedback_btn.click(
+        save_feedback,
+        inputs=[input_text, output_text, feedback_type, user_correction],
+        outputs=[feedback_result]
+    ).then(
+        lambda: gr.Textbox.update(visible=True),
+        None,
+        [feedback_result]
+    )
 
-        # Generate button
-        generate_button = st.button("Generate Gherkin", type="primary", disabled=not model_loaded)
+    # Handle download button
+    def download_gherkin(text):
+        return text
 
-    # Results area
-    with col2:
-        st.subheader("Generated Gherkin")
+    download_btn.click(
+        download_gherkin,
+        inputs=[output_text],
+        outputs=[gr.File(label="Download")]
+    )
 
-        if generate_button and user_input and model_loaded:
-            with st.spinner("Generating Gherkin scenarios..."):
-                # Tokenize input
-                inputs = tokenizer(user_input, return_tensors="pt", max_length=512, truncation=True)
+    # Example selector handler
+    def update_input(example_name):
+        if example_name != "Select an example...":
+            return examples[example_name]
+        return ""
 
-                # Generate output
-                outputs = model.generate(
-                    inputs.input_ids,
-                    max_length=max_length,
-                    num_beams=num_beams,
-                    temperature=temperature,
-                    early_stopping=True
-                )
+    example_selector.change(
+        update_input,
+        inputs=[example_selector],
+        outputs=[input_text]
+    )
 
-                # Decode output
-                generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-                # Validate the generated Gherkin
-                validation_result, validation_message = validate_gherkin(generated_text)
-
-                # Display results
-                st.code(generated_text, language="gherkin")
-
-                # Show validation results with color coding
-                if validation_result:
-                    st.success(validation_message)
-
-                    # Option to download the generated Gherkin
-                    st.download_button(
-                        label="Download Gherkin",
-                        data=generated_text,
-                        file_name="generated_scenario.feature",
-                        mime="text/plain"
-                    )
-                else:
-                    st.error(validation_message)
-                    st.warning("The generated Gherkin may need manual editing.")
-
-                # Feedback section
-                st.subheader("Feedback")
-                st.write("Help us improve the model by providing feedback:")
-
-                feedback = st.radio(
-                    "Was this Gherkin scenario useful?",
-                    ["Yes, it's good", "Needs minor edits", "Needs major changes"]
-                )
-
-                if feedback != "Yes, it's good":
-                    user_correction = st.text_area("Please provide a corrected version or suggestions:")
-
-                    if st.button("Submit Feedback"):
-                        # Save the feedback
-                        feedback_data = {
-                            "original_input": user_input,
-                            "model_output": generated_text,
-                            "feedback_type": feedback,
-                            "user_correction": user_correction,
-                            "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-                        }
-
-                        save_feedback(feedback_data)
-                        st.success("Thank you for your feedback! We'll use it to improve the model.")
-        else:
-            st.info("Enter a feature description and click 'Generate Gherkin' to create scenarios.")
-            st.image("https://www.specflow.org/wp-content/uploads/2020/09/Gherkin-1.png",
-                    caption="Example Gherkin Format", width=400)
-
-if __name__ == "__main__":
-    main()
-
-# Set up ngrok tunnel to expose Streamlit app
-# Get your authtoken from https://dashboard.ngrok.com/auth
-# !ngrok authtoken YOUR_AUTH_TOKEN  # Uncomment and add your token if needed
-
-# Start Streamlit in background
-!streamlit run gherkin_app.py &
-
-# Create and display ngrok tunnel
-public_url = ngrok.connect(port=8501)
-print(f"Streamlit app URL: {public_url}")
+# Launch the app
+demo.launch()
